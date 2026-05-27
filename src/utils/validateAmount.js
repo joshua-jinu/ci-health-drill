@@ -12,3 +12,5 @@ function validateAmount(amount) {
 }
 
 module.exports = { validateAmount };
+
+// debug: added logging for prod investigation
