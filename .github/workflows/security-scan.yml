@@ -3,11 +3,13 @@ name: Security Scan
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    if: false    # Disabled — still broken, will fix in v1.1 "temp: disable scan until fixed"
+    # Fixed: re-enabled security scan (was disabled with `if: false`)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
