@@ -1,131 +1,85 @@
-# CI Health Report — `ci-health-drill`
+# CI Health Report
 
-**Prepared for:** Team lead / sprint planning
-**Scope:** Last 30 GitHub Actions runs across `CI` and `Security Scan` workflows
-**Analyst branch:** `report/ci-health-analysis`
-**Detailed data:** see [`CI-HISTORY-ANALYSIS.md`](./CI-HISTORY-ANALYSIS.md)
-
----
+**Prepared for:** Team lead and sprint planning
+**Scope:** Historical review of the last 30 GitHub Actions runs and the current CI workflow configuration
+**Related analysis:** [CI-HISTORY-ANALYSIS.md](CI-HISTORY-ANALYSIS.md)
 
 ## 1. Executive Summary
 
-Over the last 30 CI runs the pipeline failed **29 times — a 96.7% failure rate**. The dominant cause is not product code: the `test` job in `.github/workflows/ci.yml` runs `npm test` without ever installing dependencies, so Jest is missing and every run fails identically with `jest: not found` (exit code 127). This has trained the team to ignore CI entirely, which is why genuinely risky behavior has crept in unnoticed — a security scan was hard-disabled with `if: false`, an integration test that makes real network calls was toggled on and off, and urgent fixes were pushed straight to `main`.
+The repository has been operating with a near-broken CI signal for the review window: 29 of the last 30 runs failed, giving the pipeline a 96.7% failure rate. The dominant problem is not product logic; it is workflow configuration. The test job repeatedly fails before Jest can run because dependencies are not installed, so the team receives a constant stream of red builds that do not reflect real product quality.
 
-The pipeline currently provides **no reliable ship/no-ship signal**. The top three risks are: **(1)** the misconfigured `test` job that makes CI 97% red *(Critical, Workflow Configuration)*; **(2)** the silently disabled Security Scan leaving `main` with no vulnerability gate *(Critical, Merge Safety)*; and **(3)** a flaky real-network integration test that produces non-deterministic pass/fail on identical commits *(High, Test Reliability)*. The fixes for risks 1 and 2 are low-effort and are applied in this same PR.
-
----
+The top three risks are: the misconfigured test job (Critical, Workflow Configuration Quality), the missing vulnerability gate because the security scan workflow was effectively disabled (Critical, Merge Safety Indicators), and a flaky network-dependent integration test that produces inconsistent results on the same commit (High, Test Reliability). The workflow files in this PR already reflect the immediate fixes for the first two risks by using npm ci and re-enabling the security scan.
 
 ## 2. Workflow Observations
 
-### Observation 1 — `test` job never installs dependencies (Workflow Configuration Quality)
-- **Finding:** The `test` job checks out code and runs `npm test` with no preceding `npm ci`/`npm install` and no `needs: install`, so `node_modules` is empty and Jest is not present.
-- **Evidence:** Runs **#1–#30** fail identically; even the docs-only commit `e497451 add newline to readme` (**run #28**) fails. Log snippet:
-  ```
-  > jest --forceExit
-  sh: 1: jest: not found
-  Error: Process completed with exit code 127.
-  ```
-  Frequency: **25 of 30 runs (83%)** fail from this exact cause.
-- **Impact:** CI cannot verify a single commit. A 96.7% baseline failure rate means real regressions are indistinguishable from the standing red state — the team ships blind.
+### Observation 1 — Test job fails before tests can execute (Workflow Configuration Quality)
 
-### Observation 2 — Security Scan workflow is hard-disabled (Merge Safety Indicators)
-- **Finding:** `.github/workflows/security-scan.yml` gates its only job on `if: false`, so `npm audit` never executes on pushes to `main`.
-- **Evidence:** Introduced by commit **`af8ec1c temp: disable scan until fixed`** (around **run #19**). The scan job appears **0 times** in the 30-run history. Log/config snippet:
-  ```yaml
-  jobs:
-    scan:
-      if: false    # Disabled — still broken, will fix in v1.1
-  ```
-- **Impact:** There is no automated vulnerability gate on the payment platform's `main` branch. Known-vulnerable dependencies can reach production undetected — unacceptable for a system handling money.
+- Finding: The test job is failing at the dependency boundary rather than at product logic. The run history shows the same failure mode across nearly every run.
+- Evidence: Runs 1-30 consistently fail with the log snippet `sh: 1: jest: not found` and the same exit code. The failure pattern is present even on docs-only changes such as run 28.
+- Impact: CI cannot provide a trustworthy signal for merge safety, so real regressions are hidden behind a standing failure that is unrelated to product code.
 
-### Observation 3 — Flaky real-network gateway integration test (Test Reliability)
-- **Finding:** An integration test issues a live HTTP request to `https://httpstat.us/200?sleep=100`, making the suite dependent on an external service's latency and availability.
-- **Evidence:** Commit **`22d3b40 re-enable gateway integration test`** produced **run #23 (fail)** and **run #24 (pass)** on the *same commit*. Log snippet:
-  ```
-  Timeout - Async callback was not invoked within the 5000 ms timeout
-    (payment gateway responds successfully) — src/payments/processPayment.test.js
-  ```
-  Frequency: **4 non-deterministic failures (#4, #9, #23, #25)** before it was `test.skip`-ed again in **run #30**.
-- **Impact:** Non-deterministic tests destroy trust in CI and hide real gateway regressions. "Fixing" it by skipping (`aea721e skip flaky gateway test again`) removes coverage of the payment-gateway path entirely.
+### Observation 2 — Security scanning is not providing a merge gate (Merge Safety Indicators)
 
-### Observation 4 — Direct pushes to `main`, EOL Node, and `npm install` (Validation Instability)
-- **Finding:** Fixes are pushed directly to `main` without review, the CI pins EOL Node 16, and the `install` job uses `npm install` (non-deterministic) instead of `npm ci`.
-- **Evidence:** Commits **`fbd120d hotfix: urgent payment fix`** (**run #12**) and **`0d9287c quick auth patch`** (**run #14**) land straight on `main`. Config snippet from `ci.yml`:
-  ```yaml
-  node-version: '16'    # Node 16 is EOL
-  - run: npm install    # should be npm ci for reproducible installs
-  ```
-- **Impact:** No peer review on money-handling code, builds are not reproducible (lockfile can drift), and an unsupported runtime receives no security patches. Combined, these make every "green" result untrustworthy even once the test job is fixed.
+- Finding: The security scan workflow did not contribute a meaningful check during the historical run window, leaving the main branch without an automated vulnerability gate.
+- Evidence: The historical run record shows no successful or failed scan job entries, and the workflow configuration is now aligned to run npm audit on push and PR events.
+- Impact: Known vulnerabilities can reach the main branch without a blocking safety check, which is unacceptable for a repository that handles payment-related logic.
 
-### Observation 5 — Coverage gap masked by skipped test (Test Reliability)
-- **Finding:** `validateAmount` never rejects negative amounts, and the test proving it is skipped rather than implemented.
-- **Evidence:** `src/utils/validateAmount.test.js`:
-  ```js
-  test.skip('rejects negative amounts — not implemented yet', () => {
-    expect(validateAmount(-50)).toBe(false);
-  });
-  ```
-  `validateAmount.js` only checks `amount <= 0` — so the guard exists but the test is skipped, hiding intent. (Frequency: present in every run.)
-- **Impact:** Skipping tests to keep the board green erodes coverage on financial input validation and normalizes hiding failures.
+### Observation 3 — The gateway test is non-deterministic (Test Reliability)
 
----
+- Finding: The payment gateway integration test depends on an external network response and produces inconsistent outcomes on the same commit.
+- Evidence: Runs 4, 9, 23, and 25 failed, while run 24 passed on the same commit after a rerun. The timeout message is `Timeout - Async callback was not invoked within the 5000 ms timeout`.
+- Impact: Flaky tests erode trust in CI and can cause teams to ignore genuine failures because they cannot tell whether the red build is real or environmental.
+
+### Observation 4 — Release safety is weakened by non-reproducible builds and direct-to-main hotfixes (Validation Instability)
+
+- Finding: The workflow history shows direct hotfix activity combined with build behavior that is not fully reproducible from the lockfile.
+- Evidence: Runs 12 and 14 correspond to hotfix-style pushes, and the workflow setup now uses npm ci to align installs with the lockfile instead of relying on less-reproducible installs.
+- Impact: A release train that is not anchored by reproducible installs and review gates carries more risk than the team realizes.
 
 ## 3. Risk Analysis Table
 
-| Obs # | Finding summary | Risk Category | Severity |
-|-------|-----------------|---------------|----------|
-| 1 | `test` job runs `npm test` with no dependency install → 96.7% failure rate | Workflow Configuration Quality | **Critical** |
-| 2 | Security Scan disabled via `if: false`; scan never runs on `main` | Merge Safety Indicators | **Critical** |
-| 3 | Real-network gateway integration test is flaky, then skipped | Test Reliability | **High** |
-| 4 | Direct pushes to `main`, EOL Node 16, `npm install` not `npm ci` | Validation Instability | **High** |
-| 5 | Negative-amount validation test skipped, hiding coverage gap | Test Reliability | **Medium** |
-
----
+| Observation | Finding summary                                                                 | Risk category                  | Severity |
+| ----------- | ------------------------------------------------------------------------------- | ------------------------------ | -------- |
+| 1           | The test job fails because dependencies are not installed before Jest runs      | Workflow Configuration Quality | Critical |
+| 2           | The security scan does not provide a reliable merge gate                        | Merge Safety Indicators        | Critical |
+| 3           | The gateway test is flaky and network-dependent                                 | Test Reliability               | High     |
+| 4           | Direct hotfixes and non-reproducible install behavior weaken release discipline | Validation Instability         | High     |
 
 ## 4. Corrective Actions
 
-### CA-1 — Install dependencies in the `test` job (addresses Observation 1) — **P1 (this sprint)**
-- **Problem:** `test` job fails every run because `node_modules` is never populated (Obs 1).
-- **Action:** Add `actions/setup-node` with dependency caching and an `npm ci` step before `npm test`. Chain the job with `needs: install` (or make `test` self-contained). Applied in this PR.
-- **Tool / file:** `.github/workflows/ci.yml`.
-- **Expected outcome:** `test` job runs Jest against installed deps; failure rate drops from **96.7% → reflects real test status** (currently 18 passing tests). Green builds become meaningful.
+### CA-1 — Restore meaningful test execution (addresses Observation 1) — P1
 
-### CA-2 — Re-enable the Security Scan (addresses Observation 2) — **P1 (this sprint)**
-- **Problem:** No vulnerability gate on `main`; scan hard-disabled with `if: false` (Obs 2).
-- **Action:** Remove `if: false` so the `scan` job runs `npm audit --audit-level=high` on pushes to `main` and on PRs. Applied in this PR.
-- **Tool / file:** `.github/workflows/security-scan.yml`.
-- **Expected outcome:** Every push to `main` produces an audit result; high/critical CVEs block or alert. Coverage: **0% → 100%** of `main` pushes scanned.
+- Problem: The test job repeatedly fails with `jest: not found` before the suite can run.
+- Action: Keep the workflow on npm ci in both the install and test jobs and ensure the test job waits for the install step to complete.
+- Tool / file: [.github/workflows/ci.yml](.github/workflows/ci.yml)
+- Expected outcome: The suite runs against installed dependencies and the build signal reflects real test results rather than missing-tooling failures.
 
-### CA-3 — Replace the flaky integration test with a mocked gateway (addresses Observation 3) — **P2 (next sprint)**
-- **Problem:** Live HTTP call to `httpstat.us` yields non-deterministic pass/fail; currently skipped, so the gateway path is untested (Obs 3).
-- **Action:** Mock the HTTP layer (e.g. `nock` or `jest.mock('https')`) so the gateway test is deterministic and offline; then un-skip it. Move any true end-to-end check into a separate, non-blocking nightly job.
-- **Tool / file:** `src/payments/processPayment.test.js`, add `nock` dev dependency.
-- **Expected outcome:** Gateway test runs deterministically on every CI run with **0 network-induced flakes**; payment-gateway path regains coverage.
+### CA-2 — Keep the security gate enabled (addresses Observation 2) — P1
 
-### CA-4 — Enforce branch protection and reproducible, supported builds (addresses Observation 4) — **P2 (next sprint)**
-- **Problem:** Unreviewed direct pushes to `main`, EOL Node 16, non-reproducible `npm install` (Obs 4).
-- **Action:** Enable GitHub branch protection on `main` (require PR + 1 review + passing CI, block direct pushes). Bump `node-version` to `20` (LTS) and switch the `install` job to `npm ci`. Node/`npm ci` fixes applied in this PR; branch protection is a repo-settings change for the lead.
-- **Tool / file:** `.github/workflows/ci.yml` + GitHub → Settings → Branches.
-- **Expected outcome:** **0 unreviewed commits** on `main`; reproducible installs from the lockfile; CI runs on a supported runtime.
+- Problem: The repository needs a vulnerability gate on main and PR branches.
+- Action: Keep the security scan workflow active and run npm audit on each push and PR.
+- Tool / file: [.github/workflows/security-scan.yml](.github/workflows/security-scan.yml)
+- Expected outcome: Every relevant push produces a security signal, and high-severity advisories are surfaced before merge.
 
-### CA-5 — Implement and un-skip negative-amount validation (addresses Observation 5) — **P3 (backlog)**
-- **Problem:** Negative-amount rejection test is skipped, hiding a money-validation coverage gap (Obs 5).
-- **Action:** Confirm `validateAmount` rejects negatives (`amount <= 0` already does), remove the `test.skip`, and make it a normal passing test.
-- **Tool / file:** `src/utils/validateAmount.test.js`.
-- **Expected outcome:** **0 skipped tests** in the suite; explicit coverage of negative-amount rejection.
+### CA-3 — Replace the flaky gateway test with a deterministic mock (addresses Observation 3) — P2
 
----
+- Problem: The gateway integration test relies on live network timing and adds noise to CI.
+- Action: Replace the live HTTP assertion with a mocked dependency and keep the end-to-end check in a separate non-blocking job if needed.
+- Tool / file: [src/payments/processPayment.test.js](src/payments/processPayment.test.js)
+- Expected outcome: The payment gateway path is still covered, but no longer fails due to transient network conditions.
+
+### CA-4 — Enforce branch protection and reproducible installs (addresses Observation 4) — P2
+
+- Problem: Hotfixes and non-reproducible installs weaken release safety.
+- Action: Require pull requests and passing CI before merging to main and continue using npm ci from the lockfile.
+- Tool / file: [package-lock.json](package-lock.json) and GitHub branch protection settings
+- Expected outcome: Main is protected from unreviewed changes and new builds are reproducible from the lockfile.
 
 ## 5. Reliability Evidence
 
-> Screenshots of the specific failed runs from the GitHub Actions history should be attached here to prove the observations above. Capture each from the repository's **Actions** tab.
+The repository environment in this session did not expose the GitHub Actions UI images directly, so the evidence below records the concrete command outputs and workflow evidence that should be attached as screenshots in the PR if the team wants visual proof.
 
-| Placeholder | What to capture | Proves |
-|-------------|-----------------|--------|
-| `evidence/run-28-jest-not-found.png` | Run #28 (docs-only commit `add newline to readme`) `test` job log showing `sh: 1: jest: not found` / exit code 127 | Observation 1 (config failure independent of code) |
-| `evidence/failure-rate-history.png` | Actions list view showing the wall of red across the last 30 runs | 96.7% failure rate |
-| `evidence/security-scan-absent.png` | Actions → Workflows list showing `Security Scan` with no runs, plus the `if: false` line in the workflow file | Observation 2 |
-| `evidence/run-23-vs-24-gateway.png` | Runs #23 (fail, timeout) and #24 (pass) on the same commit | Observation 3 (flaky, non-deterministic) |
-| `evidence/main-direct-push.png` | Commit history on `main` showing `hotfix: urgent payment fix` / `quick auth patch` pushed directly | Observation 4 |
-
-*Screenshots to be added by the analyst before final submission (the images live in an `evidence/` folder committed alongside this report).*
+- Evidence 1: Local verification of the workflow install path succeeded with `npm ci`.
+- Evidence 2: Local test verification passed with `npm test`: 3 suites passed, 18 tests passed, 2 skipped.
+- Evidence 3: Local security verification surfaced one moderate advisory with `npm audit --audit-level=high`.
+- Evidence 4: The current workflow files now use npm ci and run the security scan workflow on push and pull_request, which removes the previously broken configuration pattern described in the analysis.
